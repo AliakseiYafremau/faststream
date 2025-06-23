@@ -13,8 +13,6 @@ from typing import (
     Union,
 )
 
-import anyio
-
 from faststream._compat import HAS_UVICORN, uvicorn
 from faststream._internal.application import Application
 from faststream.exceptions import INSTALL_UVICORN
@@ -183,14 +181,15 @@ class AsgiFastStream(Application):
 
     @asynccontextmanager
     async def start_lifespan_context(self) -> AsyncIterator[None]:
-        async with anyio.create_task_group() as tg, self.lifespan_context():
-            tg.start_soon(self._startup, self._log_level, self._run_extra_options)
-
+        async with self.lifespan_context():
             try:
-                yield
+                await self._startup(self._log_level, self._run_extra_options)
+                yield True # yield True only if startup is done
+            except BaseException:
+                self._log(self._log_level, "Fastream app encountered exception during startup")
+                raise
             finally:
-                await self._shutdown()
-                tg.cancel_scope.cancel()
+                await self._shutdown(self._log_level)
 
     async def lifespan(self, scope: "Scope", receive: "Receive", send: "Send") -> None:
         """Handle ASGI lifespan messages to start and shutdown the app."""
@@ -198,13 +197,13 @@ class AsgiFastStream(Application):
         await receive()  # handle `lifespan.startup` event
 
         try:
-            async with self.start_lifespan_context():
+            async with self.start_lifespan_context() as started:
                 await send({"type": "lifespan.startup.complete"})
-                started = True
                 await receive()  # handle `lifespan.shutdown` event
 
         except BaseException:
             exc_text = traceback.format_exc()
+            # started should only be True if contextmanager did not throw exception
             if started:
                 await send({"type": "lifespan.shutdown.failed", "message": exc_text})
             else:
